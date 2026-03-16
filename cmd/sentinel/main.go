@@ -23,6 +23,7 @@ import (
 
 	"github.com/Harshmaury/Sentinel/internal/api"
 	"github.com/Harshmaury/Sentinel/internal/api/handler"
+	"github.com/Harshmaury/Sentinel/internal/ai"
 	"github.com/Harshmaury/Sentinel/internal/collector"
 	"github.com/Harshmaury/Sentinel/internal/config"
 	"github.com/Harshmaury/Sentinel/internal/insight"
@@ -50,6 +51,10 @@ func run(logger *log.Logger) error {
 	if serviceToken == "" {
 		logger.Println("WARNING: SENTINEL_SERVICE_TOKEN not set — upstream auth disabled")
 	}
+	apiKey := config.EnvOrDefault("ANTHROPIC_API_KEY", "")
+	if apiKey == "" {
+		logger.Println("INFO: ANTHROPIC_API_KEY not set — AI reasoning disabled, /insights/explain returns Phase 1 only")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
@@ -61,6 +66,7 @@ func run(logger *log.Logger) error {
 	// ── 3. ENGINE + STORE ─────────────────────────────────────────────────────
 	engine     := insight.NewEngine()
 	stateStore := handler.NewStateStore()
+	reasoner   := ai.NewReasoner(apiKey) // Phase 2: nil-safe, disabled if no API key
 
 	// ── 4. INITIAL ANALYSIS ──────────────────────────────────────────────────
 	analyze(ctx, coll, engine, stateStore, logger)
@@ -68,7 +74,7 @@ func run(logger *log.Logger) error {
 		httpAddr, atlasAddr, nexusAddr, forgeAddr, guardianAddr)
 
 	// ── 5. HTTP SERVER ───────────────────────────────────────────────────────
-	srv := api.NewServer(httpAddr, stateStore, engine, coll, logger)
+	srv := api.NewServer(httpAddr, stateStore, engine, coll, reasoner, logger)
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)

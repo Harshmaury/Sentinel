@@ -1,32 +1,51 @@
 # WORKFLOW-SESSION.md
-# Session: ST-phase1-sentinel-insights
+# Session: ST-phase2-ai-reasoning
 # Date: 2026-03-17
 
-## What changed — Sentinel Phase 1 (ADR-017)
+## What changed — Sentinel Phase 2 (ADR-018)
 
-New analytical insights service. Correlates data from Atlas, Nexus,
-Forge, and Guardian to produce structured platform insights via
-GET /insights/system, /incidents, /deploy-risk.
+AI reasoning layer on top of Phase 1 structured insights.
+GET /insights/explain calls Anthropic API with Phase 1 report
+and returns human-readable narrative. Degrades gracefully if
+ANTHROPIC_API_KEY is not set.
 
-## Setup and run
+## New files
+- internal/ai/reasoner.go           — Anthropic API client, prompt construction
+- internal/api/handler/explain.go   — GET /insights/explain handler
 
-mkdir -p ~/workspace/projects/apps/sentinel
-cd ~/workspace/projects/apps/sentinel
-unzip -o /mnt/c/Users/harsh/Downloads/engx-drop/sentinel-phase1-insights-20260317.zip -d .
+## Modified files
+- internal/api/server.go            — Reasoner injected, /insights/explain route
+- cmd/sentinel/main.go              — ANTHROPIC_API_KEY read, Reasoner wired
+
+## Apply
+
+cd ~/workspace/projects/apps/sentinel && \
+unzip -o /mnt/c/Users/harsh/Downloads/engx-drop/sentinel-phase2-ai-reasoning-20260317.zip -d . && \
 go mod tidy && go build ./...
-go install ./cmd/sentinel/ && cp ~/go/bin/sentinel ~/bin/sentinel
+
+## Run with AI enabled
+
+pkill sentinel 2>/dev/null; sleep 1
+SENTINEL_SERVICE_TOKEN=7d5fcbe4-44b9-4a8f-8b79-f80925c1330e \
+ANTHROPIC_API_KEY=<your-key> \
+sentinel &
+
+## Run without AI (Phase 1 only)
+
 SENTINEL_SERVICE_TOKEN=7d5fcbe4-44b9-4a8f-8b79-f80925c1330e sentinel &
 
 ## Verify
 
-curl -s http://127.0.0.1:8087/health
-curl -s http://127.0.0.1:8087/insights/system | jq '.data | {health, summary}'
-curl -s http://127.0.0.1:8087/insights/system | jq '.data.insights[] | {rule:.rule_id, title:.title}'
-curl -s http://127.0.0.1:8087/insights/incidents | jq '.data.incidents'
-curl -s http://127.0.0.1:8087/insights/deploy-risk | jq '.data'
+curl -s http://127.0.0.1:8087/insights/explain | jq '.data | {health, ai_available, ai_reasoning}'
 
 ## Commit
 
-git init && git add . && \
-git commit -m "feat: sentinel insights phase 1 (ADR-017)" && \
-git tag v0.1.0-phase1
+git add \
+  internal/ai/reasoner.go \
+  internal/api/handler/explain.go \
+  internal/api/server.go \
+  cmd/sentinel/main.go \
+  WORKFLOW-SESSION.md && \
+git commit -m "feat(phase2): AI reasoning layer GET /insights/explain (ADR-018)" && \
+git tag v0.2.0-phase2 && \
+git push origin main --tags
