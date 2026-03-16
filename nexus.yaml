@@ -1,0 +1,23 @@
+name: sentinel
+id: sentinel
+type: web-api
+language: go
+version: 0.1.0
+keywords:
+  - sentinel
+  - insights
+  - analytics
+  - diagnostics
+capabilities:
+  - platform-insights
+  - incident-detection
+  - deploy-risk-assessment
+  - cross-service-correlation
+depends_on:
+  - nexus
+  - atlas
+  - forge
+  - guardian
+runtime:
+  provider: process
+  port: 8087
