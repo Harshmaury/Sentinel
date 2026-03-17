@@ -1,14 +1,15 @@
 // @sentinel-project: sentinel
 // @sentinel-path: internal/ai/reasoner.go
-// Package ai provides the Sentinel AI reasoning layer (ADR-018).
+// Reasoner calls the Anthropic API to generate plain-prose narrative
+// reasoning on top of a Sentinel Phase 1 SystemReport (ADR-018).
 //
-// The Reasoner takes a Phase 1 SystemReport and calls the Anthropic
-// API to produce human-readable narrative reasoning. It never queries
-// raw platform data — it only reads the structured Phase 1 output.
-//
-// Graceful degradation: if the API key is absent or the call fails,
-// the Reasoner returns an empty string and ai_available=false.
-// The service never fails hard on LLM errors.
+// Rules (ADR-018):
+//   - Called ONLY on explicit GET /insights/explain — never on polling cycles
+//   - Input: Phase 1 SystemReport JSON only — never raw events or graph data
+//   - Output: plain prose ≤ 300 words, no markdown headers
+//   - Never suggests start/stop actions
+//   - Degrades gracefully: empty key or API error → aiAvailable=false, no crash
+//   - Timeout: 25s enforced by caller context (explain.go)
 package ai
 
 import (
@@ -16,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -23,109 +25,182 @@ import (
 )
 
 const (
-	anthropicAPI    = "https://api.anthropic.com/v1/messages"
-	anthropicModel  = "claude-sonnet-4-6"
-	anthropicVersion = "2023-06-01"
-	maxTokens       = 400
-	requestTimeout  = 20 * time.Second
+	anthropicEndpoint    = "https://api.anthropic.com/v1/messages"
+	anthropicModel       = "claude-sonnet-4-6"
+	anthropicVersionVal  = "2023-06-01"
+	anthropicVersionKey  = "anthropic-version"
+	anthropicAPIKeyHeader = "x-api-key"
+	maxOutputTokens      = 512 // ≤300 words output; 512 tokens is a safe ceiling
 )
 
-// systemPrompt defines the AI's role as a platform diagnostician.
-const systemPrompt = `You are a senior developer platform diagnostician.
-You are given a structured JSON report of findings from an automated
-platform monitoring system. The platform consists of services built
-in Go running on a local developer workstation: Nexus (control plane),
-Atlas (workspace knowledge), and Forge (execution engine).
+// systemPrompt defines the AI's role per ADR-018 § 6.
+const systemPrompt = `You are a senior platform diagnostician with full knowledge of this developer platform's architecture.
 
-Your task is to interpret these findings and explain in plain English:
-1. What is happening on the platform right now
-2. Why it matters
-3. What the developer should investigate first
+You will receive a structured JSON report of platform findings from an automated analysis system.
+Your task is to interpret these findings and explain them in plain English.
 
-Constraints:
-- Never suggest starting or stopping services directly
-- Keep your response under 300 words
-- Write in plain prose — no markdown headers or bullet lists
-- If the platform is healthy with no findings, say so briefly
-- Focus on the most important finding if multiple exist`
+Rules:
+- Respond in plain prose only — no markdown headers, no bullet points, no lists
+- Maximum 300 words
+- Explain what is happening, why it matters, and what to investigate first
+- Never suggest starting or stopping services — you are an observer, not a controller
+- If there are no findings, say the platform looks healthy and briefly describe normal state
+- Be direct and technical — the reader is a developer who knows this system`
 
 // Reasoner calls the Anthropic API to produce narrative reasoning.
+// Safe to create with an empty API key — ExplainReport returns aiAvailable=false immediately.
 type Reasoner struct {
 	apiKey     string
 	httpClient *http.Client
 }
 
-// NewReasoner creates a Reasoner. If apiKey is empty, AI is disabled.
+// NewReasoner creates a Reasoner. If apiKey is empty, the Reasoner is disabled —
+// ExplainReport returns ("", false, nil) without making any network call.
 func NewReasoner(apiKey string) *Reasoner {
 	return &Reasoner{
 		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: requestTimeout},
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
-// Available returns true if the AI layer is configured.
-func (r *Reasoner) Available() bool {
-	return r.apiKey != ""
-}
-
-// ExplainReport calls the LLM with the Phase 1 report and returns narrative reasoning.
-// Returns ("", false, nil) if AI is disabled. Returns ("", false, err) on API failure.
+// ExplainReport calls the Anthropic API with the Phase 1 report and returns
+// a plain-prose narrative explanation.
+//
+// Returns reasoning="", aiAvailable=false on empty key, unreachable API, or any
+// error — the service never fails hard on LLM problems (ADR-018 § 4).
 func (r *Reasoner) ExplainReport(ctx context.Context, report *insight.SystemReport) (string, bool, error) {
-	if !r.Available() {
+	if r.apiKey == "" {
 		return "", false, nil
 	}
 
-	reportJSON, err := json.MarshalIndent(report, "", "  ")
+	reportJSON, err := json.Marshal(report)
 	if err != nil {
 		return "", false, fmt.Errorf("marshal report: %w", err)
 	}
 
-	userContent := fmt.Sprintf("Platform monitoring report:\n\n```json\n%s\n```\n\nPlease explain what this means and what to investigate.", string(reportJSON))
-
-	reqBody, err := json.Marshal(map[string]any{
-		"model":      anthropicModel,
-		"max_tokens": maxTokens,
-		"system":     systemPrompt,
-		"messages": []map[string]string{
-			{"role": "user", "content": userContent},
-		},
-	})
+	text, err := r.callAPI(ctx, string(reportJSON))
 	if err != nil {
-		return "", false, fmt.Errorf("marshal request: %w", err)
+		// Degrade gracefully — API errors are not fatal per ADR-018 § 4.
+		return "", false, nil //nolint:nilerr
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicAPI, bytes.NewReader(reqBody))
+	return text, true, nil
+}
+
+// ── ANTHROPIC API ─────────────────────────────────────────────────────────────
+
+// anthropicRequest is the POST /v1/messages request body.
+type anthropicRequest struct {
+	Model     string             `json:"model"`
+	MaxTokens int                `json:"max_tokens"`
+	System    string             `json:"system"`
+	Messages  []anthropicMessage `json:"messages"`
+}
+
+// anthropicMessage is one conversation turn.
+type anthropicMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// anthropicResponse is the /v1/messages response envelope.
+type anthropicResponse struct {
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+	Error *struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// callAPI sends one request to Anthropic and returns the first text block.
+// Split into buildRequest + doRequest + parseResponse to stay under 40 lines.
+func (r *Reasoner) callAPI(ctx context.Context, userContent string) (string, error) {
+	req, err := r.buildRequest(ctx, userContent)
 	if err != nil {
-		return "", false, fmt.Errorf("build request: %w", err)
+		return "", err
 	}
+
+	raw, err := r.doRequest(req)
+	if err != nil {
+		return "", err
+	}
+
+	return parseResponse(raw)
+}
+
+// buildRequest constructs the authenticated HTTP request.
+func (r *Reasoner) buildRequest(ctx context.Context, userContent string) (*http.Request, error) {
+	payload := anthropicRequest{
+		Model:     anthropicModel,
+		MaxTokens: maxOutputTokens,
+		System:    systemPrompt,
+		Messages:  []anthropicMessage{{Role: "user", Content: userContent}},
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicEndpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("new request: %w", err)
+	}
+
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", r.apiKey)
-	req.Header.Set("anthropic-version", anthropicVersion)
+	req.Header.Set(anthropicAPIKeyHeader, r.apiKey)
+	req.Header.Set(anthropicVersionKey, anthropicVersionVal)
 
+	return req, nil
+}
+
+// doRequest executes the HTTP call and returns the raw response body.
+func (r *Reasoner) doRequest(req *http.Request) ([]byte, error) {
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
-		return "", false, fmt.Errorf("anthropic API call: %w", err)
+		return nil, fmt.Errorf("http: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", false, fmt.Errorf("anthropic API: HTTP %d", resp.StatusCode)
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
 	}
 
-	var result struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, truncate(raw, 200))
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", false, fmt.Errorf("decode response: %w", err)
+
+	return raw, nil
+}
+
+// parseResponse extracts the first text block from the Anthropic response.
+func parseResponse(raw []byte) (string, error) {
+	var result anthropicResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return "", fmt.Errorf("decode: %w", err)
+	}
+
+	if result.Error != nil {
+		return "", fmt.Errorf("api error %s: %s", result.Error.Type, result.Error.Message)
 	}
 
 	for _, block := range result.Content {
 		if block.Type == "text" && block.Text != "" {
-			return block.Text, true, nil
+			return block.Text, nil
 		}
 	}
-	return "", false, fmt.Errorf("no text content in response")
+
+	return "", fmt.Errorf("no text in response")
+}
+
+// truncate returns at most n bytes of b as a string — for safe error messages.
+func truncate(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "..."
 }
