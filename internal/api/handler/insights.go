@@ -6,6 +6,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -103,9 +104,15 @@ func (h *InsightsHandler) DeployRisk(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 
-	state := h.coll.Collect(ctx)
-	risk := h.engine.DeployRisk(state)
+	traceID := deployRiskTraceID()
+	state   := h.coll.Collect(ctx, traceID)
+	risk    := h.engine.DeployRisk(state)
 	respondOK(w, risk)
+}
+
+// deployRiskTraceID generates a trace ID for on-demand deploy-risk collections.
+func deployRiskTraceID() string {
+	return fmt.Sprintf("st-dr-%d", time.Now().UnixNano())
 }
 
 // ── RESPONSE HELPERS ──────────────────────────────────────────────────────────
