@@ -26,6 +26,9 @@ func (e *Engine) Analyze(state *collector.PlatformState) *SystemReport {
 	insights = append(insights, e.ruleDependencyRisk(state)...)
 	insights = append(insights, e.ruleStaleProject(state)...)
 	insights = append(insights, e.ruleHighDenialRate(state)...)
+	insights = append(insights, e.ruleServiceMaintenance(state)...)
+	insights = append(insights, e.ruleBuildFailureRate(state)...)
+	insights = append(insights, e.ruleAgentDisconnected(state)...)
 
 	health := classifyHealth(insights)
 	summary := buildSummary(insights)
@@ -235,12 +238,82 @@ func (e *Engine) ruleHighDenialRate(state *collector.PlatformState) []*Insight {
 	return insights
 }
 
+// S-006: detect services stuck in maintenance (desired=running, actual=maintenance).
+func (e *Engine) ruleServiceMaintenance(state *collector.PlatformState) []*Insight {
+	var insights []*Insight
+	for _, svc := range state.Services {
+		if svc.DesiredState == "running" && svc.ActualState == "maintenance" {
+			insights = append(insights, &Insight{
+				RuleID:   RuleServiceMaintenance,
+				Severity: SeverityWarning,
+				Title:    fmt.Sprintf("Service in maintenance: %s", svc.Name),
+				Detail:   fmt.Sprintf("%s is desired=running but stuck in maintenance after %d failure(s) — run: engx services reset %s", svc.Name, svc.FailCount, svc.Name),
+				Subjects: []string{svc.Project},
+				At:       time.Now().UTC(),
+			})
+		}
+	}
+	return insights
+}
+
+// S-007: sustained build failure rate from Guardian G-003 findings.
+func (e *Engine) ruleBuildFailureRate(state *collector.PlatformState) []*Insight {
+	var insights []*Insight
+	for _, f := range state.Findings {
+		if f.RuleID == "G-003" {
+			insights = append(insights, &Insight{
+				RuleID:   RuleBuildFailureRate,
+				Severity: SeverityError,
+				Title:    fmt.Sprintf("High build failure rate: %s", f.Target),
+				Detail:   fmt.Sprintf("Guardian G-003: %s — check build logs: engx logs %s-daemon", f.Message, f.Target),
+				Subjects: []string{f.Target},
+				At:       time.Now().UTC(),
+			})
+		}
+	}
+	return insights
+}
+
+// S-008: engxa offline while services are desired-running.
+func (e *Engine) ruleAgentDisconnected(state *collector.PlatformState) []*Insight {
+	if len(state.Agents) == 0 {
+		return nil
+	}
+	anyOnline := false
+	for _, a := range state.Agents {
+		if a.Online {
+			anyOnline = true
+		}
+	}
+	if anyOnline {
+		return nil
+	}
+	desiredRunning := 0
+	for _, svc := range state.Services {
+		if svc.DesiredState == "running" {
+			desiredRunning++
+		}
+	}
+	if desiredRunning == 0 {
+		return nil
+	}
+	return []*Insight{{
+		RuleID:   RuleAgentDisconnected,
+		Severity: SeverityError,
+		Title:    "engxa agent offline",
+		Detail:   fmt.Sprintf("All agents offline — %d service(s) desired=running will not start until engxa reconnects", desiredRunning),
+		Subjects: []string{"engxa"},
+		At:       time.Now().UTC(),
+	}}
+}
+
 // ── HELPERS ───────────────────────────────────────────────────────────────────
 
 func classifyHealth(insights []*Insight) string {
 	for _, ins := range insights {
 		switch ins.RuleID {
-		case RuleCascadeDetection, RuleDeployCorrelation:
+		case RuleCascadeDetection, RuleDeployCorrelation,
+			RuleBuildFailureRate, RuleAgentDisconnected:
 			if ins.Severity == SeverityError {
 				return HealthIncident
 			}

@@ -166,7 +166,7 @@ func analyze(
 	logger *log.Logger,
 ) {
 	traceID := newTraceID()
-	state   := coll.Collect(ctx, traceID)
+	state   := coll.Collect(ctx)
 	report  := engine.Analyze(state)
 	store.Set(state, report)
 	logger.Printf("analyzed trace=%s — health=%s insights=%d (%s)",

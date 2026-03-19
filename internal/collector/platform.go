@@ -2,12 +2,6 @@
 // @sentinel-path: internal/collector/platform.go
 // Package collector fetches and assembles PlatformState from all upstream services.
 // PlatformState is the single input to the Sentinel insight engine.
-//
-// Concurrency safety (ISSUE-001 fix):
-//   lastEventID is protected by mu. Two goroutines call Collect():
-//   1. 30s polling loop (analyze)
-//   2. HTTP handler (GET /insights/deploy-risk)
-//   mu.Lock() wraps the lastEventID read and write in fetchEvents().
 package collector
 
 import (
@@ -15,21 +9,34 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sync"
 	"time"
-
-	"github.com/Harshmaury/Canon/identity"
 )
 
 // ── UPSTREAM DATA TYPES ───────────────────────────────────────────────────────
 
+// Service is a managed process from Nexus /services.
+type Service struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Project      string `json:"project"`
+	DesiredState string `json:"desired_state"`
+	ActualState  string `json:"actual_state"`
+	FailCount    int    `json:"fail_count"`
+}
+
+// Agent is a registered engxa agent from Nexus /agents.
+type Agent struct {
+	ID     string `json:"id"`
+	Online bool   `json:"online"`
+}
+
 // Project is a project from Atlas /workspace/projects.
 type Project struct {
-	ID           string   `json:"id"`
-	Status       string   `json:"status"`
-	Language     string   `json:"language"`
+	ID          string   `json:"id"`
+	Status      string   `json:"status"`
+	Language    string   `json:"language"`
 	Capabilities []string `json:"capabilities"`
-	DependsOn    []string `json:"depends_on"`
+	DependsOn   []string `json:"depends_on"`
 }
 
 // NexusEvent is an event from Nexus /events.
@@ -45,9 +52,9 @@ type NexusEvent struct {
 
 // NexusMetrics is the runtime counter snapshot from Nexus /metrics.
 type NexusMetrics struct {
-	ServicesCrashedTotal int64   `json:"services_crashed_total"`
-	ServicesRunning      int64   `json:"services_running"`
-	UptimeSeconds        float64 `json:"uptime_seconds"`
+	ServicesCrashedTotal  int64   `json:"services_crashed_total"`
+	ServicesRunning       int64   `json:"services_running"`
+	UptimeSeconds         float64 `json:"uptime_seconds"`
 }
 
 // ForgeExecution is one record from Forge /history.
@@ -77,14 +84,14 @@ type PlatformState struct {
 	Metrics     NexusMetrics
 	Executions  []*ForgeExecution
 	Findings    []*GuardianFinding
+	Services    []*Service  // S-006, S-008: service lifecycle state
+	Agents      []*Agent    // S-008: agent connectivity
 	CollectedAt time.Time
 }
 
 // ── COLLECTOR ─────────────────────────────────────────────────────────────────
 
 // Collector fetches data from all platform services.
-// mu protects lastEventID — Collect() is called from both the polling
-// goroutine (analyze) and the HTTP handler (DeployRisk). (ISSUE-001)
 type Collector struct {
 	atlasAddr    string
 	nexusAddr    string
@@ -92,7 +99,6 @@ type Collector struct {
 	guardianAddr string
 	serviceToken string
 	httpClient   *http.Client
-	mu           sync.Mutex // guards lastEventID
 	lastEventID  int64
 }
 
@@ -109,19 +115,20 @@ func NewCollector(atlasAddr, nexusAddr, forgeAddr, guardianAddr, serviceToken st
 }
 
 // Collect fetches all upstream data and returns a PlatformState.
-// traceID is the collection-cycle trace ID for X-Trace-ID propagation (FEAT-002).
-func (c *Collector) Collect(ctx context.Context, traceID string) *PlatformState {
+func (c *Collector) Collect(ctx context.Context) *PlatformState {
 	state := &PlatformState{CollectedAt: time.Now().UTC()}
-	state.Projects  = c.fetchProjects(ctx, traceID)
-	state.Events    = c.fetchEvents(ctx, traceID)
-	state.Metrics   = c.fetchMetrics(ctx, traceID)
-	state.Executions = c.fetchHistory(ctx, traceID)
-	state.Findings  = c.fetchFindings(ctx, traceID)
+	state.Projects   = c.fetchProjects(ctx)
+	state.Events     = c.fetchEvents(ctx)
+	state.Metrics    = c.fetchMetrics(ctx)
+	state.Executions = c.fetchHistory(ctx)
+	state.Findings   = c.fetchFindings(ctx)
+	state.Services   = c.fetchServices(ctx)
+	state.Agents     = c.fetchAgents(ctx)
 	return state
 }
 
-func (c *Collector) fetchProjects(ctx context.Context, traceID string) []*Project {
-	resp, err := c.get(ctx, c.atlasAddr, "/workspace/projects", traceID)
+func (c *Collector) fetchProjects(ctx context.Context) []*Project {
+	resp, err := c.get(ctx, c.atlasAddr, "/workspace/projects")
 	if err != nil {
 		return nil
 	}
@@ -136,19 +143,13 @@ func (c *Collector) fetchProjects(ctx context.Context, traceID string) []*Projec
 	return env.Data
 }
 
-// fetchEvents reads and advances lastEventID under mu to prevent the
-// data race between the polling goroutine and DeployRisk handler. (ISSUE-001)
-func (c *Collector) fetchEvents(ctx context.Context, traceID string) []*NexusEvent {
-	c.mu.Lock()
+func (c *Collector) fetchEvents(ctx context.Context) []*NexusEvent {
 	path := fmt.Sprintf("/events?since=%d&limit=200", c.lastEventID)
-	c.mu.Unlock()
-
-	resp, err := c.get(ctx, c.nexusAddr, path, traceID)
+	resp, err := c.get(ctx, c.nexusAddr, path)
 	if err != nil {
 		return nil
 	}
 	defer resp.Body.Close()
-
 	var env struct {
 		OK   bool          `json:"ok"`
 		Data []*NexusEvent `json:"data"`
@@ -156,31 +157,27 @@ func (c *Collector) fetchEvents(ctx context.Context, traceID string) []*NexusEve
 	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
 		return nil
 	}
-
-	c.mu.Lock()
 	for _, e := range env.Data {
 		if e.ID > c.lastEventID {
 			c.lastEventID = e.ID
 		}
 	}
-	c.mu.Unlock()
-
 	return env.Data
 }
 
-func (c *Collector) fetchMetrics(ctx context.Context, traceID string) NexusMetrics {
-	resp, err := c.get(ctx, c.nexusAddr, "/metrics", traceID)
+func (c *Collector) fetchMetrics(ctx context.Context) NexusMetrics {
+	resp, err := c.get(ctx, c.nexusAddr, "/metrics")
 	if err != nil {
 		return NexusMetrics{}
 	}
 	defer resp.Body.Close()
 	var m NexusMetrics
-	json.NewDecoder(resp.Body).Decode(&m) //nolint:errcheck
+	json.NewDecoder(resp.Body).Decode(&m)
 	return m
 }
 
-func (c *Collector) fetchHistory(ctx context.Context, traceID string) []*ForgeExecution {
-	resp, err := c.get(ctx, c.forgeAddr, "/history?limit=200", traceID)
+func (c *Collector) fetchHistory(ctx context.Context) []*ForgeExecution {
+	resp, err := c.get(ctx, c.forgeAddr, "/history?limit=200")
 	if err != nil {
 		return nil
 	}
@@ -195,8 +192,8 @@ func (c *Collector) fetchHistory(ctx context.Context, traceID string) []*ForgeEx
 	return env.Data
 }
 
-func (c *Collector) fetchFindings(ctx context.Context, traceID string) []*GuardianFinding {
-	resp, err := c.get(ctx, c.guardianAddr, "/guardian/findings", traceID)
+func (c *Collector) fetchFindings(ctx context.Context) []*GuardianFinding {
+	resp, err := c.get(ctx, c.guardianAddr, "/guardian/findings")
 	if err != nil {
 		return nil
 	}
@@ -213,19 +210,45 @@ func (c *Collector) fetchFindings(ctx context.Context, traceID string) []*Guardi
 	return env.Data.Findings
 }
 
-// get performs an authenticated GET against a platform service.
-// Uses Canon identity constants for headers (ISSUE-003).
-// Passes traceID as X-Trace-ID on every outbound call (FEAT-002).
-func (c *Collector) get(ctx context.Context, base, path, traceID string) (*http.Response, error) {
+func (c *Collector) fetchServices(ctx context.Context) []*Service {
+	resp, err := c.get(ctx, c.nexusAddr, "/services")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var env struct {
+		OK   bool       `json:"ok"`
+		Data []*Service `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return nil
+	}
+	return env.Data
+}
+
+func (c *Collector) fetchAgents(ctx context.Context) []*Agent {
+	resp, err := c.get(ctx, c.nexusAddr, "/agents")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var env struct {
+		OK   bool     `json:"ok"`
+		Data []*Agent `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return nil
+	}
+	return env.Data
+}
+
+func (c *Collector) get(ctx context.Context, base, path string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 	if err != nil {
 		return nil, err
 	}
 	if c.serviceToken != "" && path != "/health" {
-		req.Header.Set(identity.ServiceTokenHeader, c.serviceToken)
-	}
-	if traceID != "" {
-		req.Header.Set(identity.TraceIDHeader, traceID)
+		req.Header.Set("X-Service-Token", c.serviceToken)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

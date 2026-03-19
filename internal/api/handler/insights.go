@@ -104,8 +104,7 @@ func (h *InsightsHandler) DeployRisk(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 
-	traceID := deployRiskTraceID()
-	state   := h.coll.Collect(ctx, traceID)
+	state   := h.coll.Collect(ctx)
 	risk    := h.engine.DeployRisk(state)
 	respondOK(w, risk)
 }

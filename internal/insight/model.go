@@ -12,6 +12,9 @@ const (
 	RuleDependencyRisk    = "S-003"
 	RuleStaleProject      = "S-004"
 	RuleHighDenialRate    = "S-005"
+	RuleServiceMaintenance = "S-006" // desired=running but actual=maintenance
+	RuleBuildFailureRate   = "S-007" // sustained high build failure rate from G-003
+	RuleAgentDisconnected  = "S-008" // engxa offline while services desired-running
 )
 
 // Health levels for system report.
