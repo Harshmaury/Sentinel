@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -30,7 +31,7 @@ import (
 	"github.com/Harshmaury/Sentinel/internal/insight"
 )
 
-const sentinelVersion = "0.2.0"
+const sentinelVersion = "0.3.0"
 
 func main() {
 	logger := log.New(os.Stdout, "[sentinel] ", log.LstdFlags)
@@ -70,7 +71,7 @@ func run(logger *log.Logger) error {
 	reasoner   := ai.NewReasoner(apiKey) // Phase 2: nil-safe, disabled if no API key
 
 	// ── 4. ACTUATOR (ADR-024: self-healing — bounded write authority) ─────────
-	recovLog := actuator.NewRecoveryLog()
+	recovLog := actuator.NewRecoveryLogWithPath(recoveryLogPath(logger), logger)
 	act      := actuator.NewActuator(nexusAddr, serviceToken, recovLog)
 
 	// ── 5. INITIAL ANALYSIS ──────────────────────────────────────────────────
@@ -119,7 +120,23 @@ func run(logger *log.Logger) error {
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	<-done
+	_ = recovLog.Close()
 	return nil
+}
+
+// recoveryLogPath returns the path for the sentinel recovery log.
+func recoveryLogPath(logger *log.Logger) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		logger.Printf("WARNING: cannot resolve home dir for recovery log: %v", err)
+		return ""
+	}
+	dir := filepath.Join(home, ".nexus")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		logger.Printf("WARNING: cannot create .nexus dir: %v", err)
+		return ""
+	}
+	return filepath.Join(dir, "recovery.log")
 }
 
 // analyze runs one collection + analysis + recovery cycle (ADR-024).

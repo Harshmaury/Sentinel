@@ -1,39 +1,45 @@
 # WORKFLOW-SESSION.md
-# Session: ST-fix-canon-version
+# Session: ST-phase3-recovery-log
 # Date: 2026-03-19
 
-## What changed
+## What changed — Sentinel Phase 3
 
-Two fixes in one delivery:
-1. Canon migration (ADR-016): replaced raw "X-Service-Token" in platform
-   collector with canon.ServiceTokenHeader.
-2. Version drift fix: sentinelVersion and nexus.yaml now match
-   SERVICE-CONTRACT.md (0.2.0-phase2).
+Recovery log disk persistence. Every Sentinel actuator action is now written
+as a JSON line to ~/.nexus/recovery.log — permanent audit trail that survives
+restarts. The in-memory ring buffer (200 entries) is retained for fast API reads.
+GET /insights/recovery-log now reflects the persistent log.
 
-## Modified files
-- internal/collector/platform.go  — canon import + ServiceTokenHeader
-- cmd/sentinel/main.go             — sentinelVersion = "0.2.0"
-- nexus.yaml                       — version: 0.2.0
+## New/modified files
+- internal/actuator/log.go     — NewRecoveryLogWithPath(), writeToDisk(), Close()
+- cmd/sentinel/main.go         — version 0.3.0, recoveryLogPath(), disk log wired
+- nexus.yaml                   — version: 0.3.0
 
 ## Apply
 
 cd ~/workspace/projects/apps/sentinel && \
-unzip -o /mnt/c/Users/harsh/Downloads/engx-drop/sentinel-fix-canon-version-20260319.zip -d . && \
+unzip -o /mnt/c/Users/harsh/Downloads/engx-drop/sentinel-phase3-recovery-log-20260319.zip -d . && \
 go build ./...
 
 ## Verify
 
-grep 'canon.ServiceTokenHeader' internal/collector/platform.go
-grep '"X-Service-Token"' internal/collector/platform.go   # expected: no output
-grep 'sentinelVersion' cmd/sentinel/main.go                # expected: "0.2.0"
-grep 'version' nexus.yaml                                  # expected: 0.2.0
+go build ./...
+pkill sentinel 2>/dev/null; sleep 1
+SENTINEL_SERVICE_TOKEN=<token> ANTHROPIC_API_KEY=<key> sentinel &
+sleep 2
+# Trigger a recovery action, then:
+cat ~/.nexus/recovery.log
+# Expected: one JSON line per actuator action
+
+curl -s http://127.0.0.1:8087/insights/recovery-log | jq '.data | length'
+# Expected: same count as lines in recovery.log
 
 ## Commit
 
 git add \
-  internal/collector/platform.go \
+  internal/actuator/log.go \
   cmd/sentinel/main.go \
   nexus.yaml \
   WORKFLOW-SESSION.md && \
-git commit -m "fix: Canon migration + version sync 0.2.0 (audit #2, #6)" && \
-git push origin main
+git commit -m "feat(phase3): recovery log disk persistence → ~/.nexus/recovery.log" && \
+git tag v0.3.0-phase3 && \
+git push origin main --tags
