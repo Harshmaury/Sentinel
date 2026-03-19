@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	canonevents "github.com/Harshmaury/Canon/events"
 	"github.com/Harshmaury/Sentinel/internal/collector"
 )
 
@@ -82,7 +83,7 @@ func (e *Engine) ruleCascadeDetection(state *collector.PlatformState) []*Insight
 	crashed := map[string]bool{}
 
 	for _, ev := range state.Events {
-		if ev.Type == "SERVICE_CRASHED" && ev.CreatedAt.After(cutoff) {
+		if ev.Type == canonevents.EventServiceCrashed && ev.CreatedAt.After(cutoff) {
 			crashed[ev.ServiceID] = true
 		}
 	}
@@ -126,7 +127,7 @@ func (e *Engine) ruleDeployCorrelation(state *collector.PlatformState) []*Insigh
 	var firstCrash time.Time
 	crashCount := 0
 	for _, ev := range state.Events {
-		if ev.Type == "SERVICE_CRASHED" && ev.CreatedAt.After(cutoff) {
+		if ev.Type == canonevents.EventServiceCrashed && ev.CreatedAt.After(cutoff) {
 			crashCount++
 			if firstCrash.IsZero() || ev.CreatedAt.Before(firstCrash) {
 				firstCrash = ev.CreatedAt
