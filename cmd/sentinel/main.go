@@ -30,7 +30,7 @@ import (
 	"github.com/Harshmaury/Sentinel/internal/insight"
 )
 
-const sentinelVersion = "0.1.0"
+const sentinelVersion = "0.2.0"
 
 func main() {
 	logger := log.New(os.Stdout, "[sentinel] ", log.LstdFlags)

@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	canon "github.com/Harshmaury/Canon/identity"
 )
 
 // ── UPSTREAM DATA TYPES ───────────────────────────────────────────────────────
@@ -248,7 +250,7 @@ func (c *Collector) get(ctx context.Context, base, path string) (*http.Response,
 		return nil, err
 	}
 	if c.serviceToken != "" && path != "/health" {
-		req.Header.Set("X-Service-Token", c.serviceToken)
+		req.Header.Set(canon.ServiceTokenHeader, c.serviceToken)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
