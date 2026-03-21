@@ -1,17 +1,25 @@
 // @sentinel-project: sentinel
 // @sentinel-path: internal/collector/platform.go
-// Package collector fetches and assembles PlatformState from all upstream services.
-// PlatformState is the single input to the Sentinel insight engine.
+// ADR-039: complete Herald migration — all upstream calls now use typed clients.
+// FIX T2-A (retained): mu protects lastEventID for concurrent access safety.
+//
+// Migration summary:
+//   fetchProjects  → atlas Herald client (was raw HTTP to Atlas)
+//   fetchEvents    → nexus Herald client (already Herald, mutex retained)
+//   fetchMetrics   → nexus Herald NexusMetrics client (was raw HTTP)
+//   fetchHistory   → forge Herald client (was raw HTTP to Forge)
+//   fetchFindings  → guardian Herald client (was raw HTTP to Guardian)
+//   fetchServices  → nexus Herald client (already Herald)
+//   fetchAgents    → nexus Herald client (already Herald)
+//
+// Raw httpClient removed entirely — no net/http dependency remains.
 package collector
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
+	"sync"
 	"time"
 
-	canon "github.com/Harshmaury/Canon/identity"
 	herald "github.com/Harshmaury/Herald/client"
 )
 
@@ -35,11 +43,11 @@ type Agent struct {
 
 // Project is a project from Atlas /workspace/projects.
 type Project struct {
-	ID          string   `json:"id"`
-	Status      string   `json:"status"`
-	Language    string   `json:"language"`
+	ID           string   `json:"id"`
+	Status       string   `json:"status"`
+	Language     string   `json:"language"`
 	Capabilities []string `json:"capabilities"`
-	DependsOn   []string `json:"depends_on"`
+	DependsOn    []string `json:"depends_on"`
 }
 
 // NexusEvent is an event from Nexus /events.
@@ -55,9 +63,9 @@ type NexusEvent struct {
 
 // NexusMetrics is the runtime counter snapshot from Nexus /metrics.
 type NexusMetrics struct {
-	ServicesCrashedTotal  int64   `json:"services_crashed_total"`
-	ServicesRunning       int64   `json:"services_running"`
-	UptimeSeconds         float64 `json:"uptime_seconds"`
+	ServicesCrashedTotal int64   `json:"services_crashed_total"`
+	ServicesRunning      int64   `json:"services_running"`
+	UptimeSeconds        float64 `json:"uptime_seconds"`
 }
 
 // ForgeExecution is one record from Forge /history.
@@ -87,79 +95,94 @@ type PlatformState struct {
 	Metrics     NexusMetrics
 	Executions  []*ForgeExecution
 	Findings    []*GuardianFinding
-	Services    []*Service  // S-006, S-008: service lifecycle state
-	Agents      []*Agent    // S-008: agent connectivity
+	Services    []*Service
+	Agents      []*Agent
 	CollectedAt time.Time
 }
 
 // ── COLLECTOR ─────────────────────────────────────────────────────────────────
 
-// Collector fetches data from all platform services.
-// ADR-039: Nexus calls (events, services, agents) use Herald.
-// Atlas, Forge, Guardian calls remain raw HTTP (no Herald client for those yet).
+// Collector fetches data from all platform services via Herald.
+// ADR-039: all upstream calls use typed Herald clients — no raw HTTP remains.
+// Concurrency: Collect() is safe for concurrent callers — mu protects lastEventID.
 type Collector struct {
-	atlasAddr    string
-	nexusAddr    string
-	forgeAddr    string
-	guardianAddr string
-	serviceToken string
-	httpClient   *http.Client
-	heraldClient *herald.Client
-	lastEventID  int64
+	nexus    *herald.Client // Nexus: events, services, agents, metrics
+	atlas    *herald.Client // Atlas: workspace projects
+	forge    *herald.Client // Forge: execution history
+	guardian *herald.Client // Guardian: findings
+
+	mu          sync.Mutex // protects lastEventID
+	lastEventID int64
 }
 
-// NewCollector creates a Collector.
+// NewCollector creates a Collector with Herald clients for all upstream services.
 func NewCollector(atlasAddr, nexusAddr, forgeAddr, guardianAddr, serviceToken string) *Collector {
 	return &Collector{
-		atlasAddr:    atlasAddr,
-		nexusAddr:    nexusAddr,
-		forgeAddr:    forgeAddr,
-		guardianAddr: guardianAddr,
-		serviceToken: serviceToken,
-		httpClient:   &http.Client{Timeout: 10 * time.Second},
-		heraldClient: herald.New(nexusAddr, herald.WithToken(serviceToken)),
+		nexus:    herald.New(nexusAddr, herald.WithToken(serviceToken)),
+		atlas:    herald.NewForService(atlasAddr, serviceToken),
+		forge:    herald.NewForService(forgeAddr, serviceToken),
+		guardian: herald.NewForService(guardianAddr, serviceToken),
 	}
 }
 
 // Collect fetches all upstream data and returns a PlatformState.
+// Safe for concurrent callers.
 func (c *Collector) Collect(ctx context.Context) *PlatformState {
 	state := &PlatformState{CollectedAt: time.Now().UTC()}
-	state.Projects   = c.fetchProjects(ctx)
-	state.Events     = c.fetchEvents(ctx)
-	state.Metrics    = c.fetchMetrics(ctx)
+	state.Projects = c.fetchProjects(ctx)
+	state.Events = c.fetchEvents(ctx)
+	state.Metrics = c.fetchMetrics(ctx)
 	state.Executions = c.fetchHistory(ctx)
-	state.Findings   = c.fetchFindings(ctx)
-	state.Services   = c.fetchServices(ctx)
-	state.Agents     = c.fetchAgents(ctx)
+	state.Findings = c.fetchFindings(ctx)
+	state.Services = c.fetchServices(ctx)
+	state.Agents = c.fetchAgents(ctx)
 	return state
 }
 
+// fetchProjects uses Herald Atlas client.
 func (c *Collector) fetchProjects(ctx context.Context) []*Project {
-	resp, err := c.get(ctx, c.atlasAddr, "/workspace/projects")
+	projs, err := c.atlas.Atlas().Projects(ctx)
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
-	var env struct {
-		OK   bool       `json:"ok"`
-		Data []*Project `json:"data"`
+	out := make([]*Project, 0, len(projs))
+	for _, p := range projs {
+		caps := p.Capabilities
+		if caps == nil {
+			caps = []string{}
+		}
+		deps := p.DependsOn
+		if deps == nil {
+			deps = []string{}
+		}
+		out = append(out, &Project{
+			ID:           p.ID,
+			Status:       p.Status,
+			Language:     p.Language,
+			Capabilities: caps,
+			DependsOn:    deps,
+		})
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		return nil
-	}
-	return env.Data
+	return out
 }
 
-// fetchEvents uses Herald (ADR-039).
+// fetchEvents uses Herald Nexus events client.
+// mu serialises access to lastEventID — safe for concurrent callers.
 func (c *Collector) fetchEvents(ctx context.Context) []*NexusEvent {
-	evts, err := c.heraldClient.Events().Since(ctx, c.lastEventID, 200)
+	c.mu.Lock()
+	sinceID := c.lastEventID
+	c.mu.Unlock()
+
+	evts, err := c.nexus.Events().Since(ctx, sinceID, 200)
 	if err != nil {
 		return nil
 	}
+
+	var maxID int64
 	result := make([]*NexusEvent, 0, len(evts))
 	for _, e := range evts {
-		if e.ID > c.lastEventID {
-			c.lastEventID = e.ID
+		if e.ID > maxID {
+			maxID = e.ID
 		}
 		var ts time.Time
 		ts, _ = time.Parse(time.RFC3339Nano, e.CreatedAt)
@@ -172,99 +195,96 @@ func (c *Collector) fetchEvents(ctx context.Context) []*NexusEvent {
 			TraceID: e.TraceID, CreatedAt: ts,
 		})
 	}
+
+	if maxID > sinceID {
+		c.mu.Lock()
+		if maxID > c.lastEventID {
+			c.lastEventID = maxID
+		}
+		c.mu.Unlock()
+	}
 	return result
 }
 
+// fetchMetrics uses Herald NexusMetrics client.
 func (c *Collector) fetchMetrics(ctx context.Context) NexusMetrics {
-	resp, err := c.get(ctx, c.nexusAddr, "/metrics")
+	m, err := c.nexus.NexusMetrics().Get(ctx)
 	if err != nil {
 		return NexusMetrics{}
 	}
-	defer resp.Body.Close()
-	var m NexusMetrics
-	json.NewDecoder(resp.Body).Decode(&m)
-	return m
+	return NexusMetrics{
+		ServicesCrashedTotal: m.ServicesCrashedTotal,
+		ServicesRunning:      m.ServicesRunning,
+		UptimeSeconds:        m.UptimeSeconds,
+	}
 }
 
+// fetchHistory uses Herald Forge client.
 func (c *Collector) fetchHistory(ctx context.Context) []*ForgeExecution {
-	resp, err := c.get(ctx, c.forgeAddr, "/history?limit=200")
+	records, err := c.forge.Forge().History(ctx, 200)
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
-	var env struct {
-		OK   bool              `json:"ok"`
-		Data []*ForgeExecution `json:"data"`
+	out := make([]*ForgeExecution, 0, len(records))
+	for _, r := range records {
+		out = append(out, &ForgeExecution{
+			Intent:     r.Intent,
+			Target:     r.Target,
+			Status:     r.Status,
+			DurationMS: r.DurationMS,
+			TraceID:    r.TraceID,
+			StartedAt:  r.StartedAt,
+		})
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		return nil
-	}
-	return env.Data
+	return out
 }
 
+// fetchFindings uses Herald Guardian client.
 func (c *Collector) fetchFindings(ctx context.Context) []*GuardianFinding {
-	resp, err := c.get(ctx, c.guardianAddr, "/guardian/findings")
+	report, err := c.guardian.Guardian().Findings(ctx)
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
-	var env struct {
-		OK   bool `json:"ok"`
-		Data struct {
-			Findings []*GuardianFinding `json:"findings"`
-		} `json:"data"`
+	out := make([]*GuardianFinding, 0, len(report.Findings))
+	for _, f := range report.Findings {
+		out = append(out, &GuardianFinding{
+			RuleID:   f.RuleID,
+			Severity: f.Severity,
+			Target:   f.Target,
+			Message:  f.Message,
+			Count:    f.Count,
+			LastSeen: f.LastSeen,
+		})
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		return nil
-	}
-	return env.Data.Findings
+	return out
 }
 
-// fetchServices uses Herald (ADR-039).
+// fetchServices uses Herald Nexus services client.
 func (c *Collector) fetchServices(ctx context.Context) []*Service {
-	svcs, err := c.heraldClient.Services().List(ctx)
+	svcs, err := c.nexus.Services().List(ctx)
 	if err != nil {
 		return nil
 	}
-	result := make([]*Service, 0, len(svcs))
+	out := make([]*Service, 0, len(svcs))
 	for _, s := range svcs {
-		result = append(result, &Service{
+		out = append(out, &Service{
 			ID: s.ID, Name: s.Name, Project: s.Project,
 			DesiredState: s.DesiredState, ActualState: s.ActualState,
 			FailCount: s.FailCount,
 		})
 	}
-	return result
+	return out
 }
 
-// fetchAgents uses Herald (ADR-039).
+// fetchAgents uses Herald Nexus agents client.
 func (c *Collector) fetchAgents(ctx context.Context) []*Agent {
-	agts, err := c.heraldClient.Agents().List(ctx)
+	agts, err := c.nexus.Agents().List(ctx)
 	if err != nil {
 		return nil
 	}
-	result := make([]*Agent, 0, len(agts))
+	out := make([]*Agent, 0, len(agts))
 	for _, a := range agts {
-		result = append(result, &Agent{ID: a.ID, Online: a.Online})
+		out = append(out, &Agent{ID: a.ID, Online: a.Online})
 	}
-	return result
-}
-
-func (c *Collector) get(ctx context.Context, base, path string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
-	if err != nil {
-		return nil, err
-	}
-	if c.serviceToken != "" && path != "/health" {
-		req.Header.Set(canon.ServiceTokenHeader, c.serviceToken)
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("HTTP %d for %s%s", resp.StatusCode, base, path)
-	}
-	return resp, nil
+	return out
 }
