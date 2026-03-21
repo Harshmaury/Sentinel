@@ -12,6 +12,7 @@ import (
 	"time"
 
 	canon "github.com/Harshmaury/Canon/identity"
+	herald "github.com/Harshmaury/Herald/client"
 )
 
 // ── UPSTREAM DATA TYPES ───────────────────────────────────────────────────────
@@ -94,6 +95,8 @@ type PlatformState struct {
 // ── COLLECTOR ─────────────────────────────────────────────────────────────────
 
 // Collector fetches data from all platform services.
+// ADR-039: Nexus calls (events, services, agents) use Herald.
+// Atlas, Forge, Guardian calls remain raw HTTP (no Herald client for those yet).
 type Collector struct {
 	atlasAddr    string
 	nexusAddr    string
@@ -101,6 +104,7 @@ type Collector struct {
 	guardianAddr string
 	serviceToken string
 	httpClient   *http.Client
+	heraldClient *herald.Client
 	lastEventID  int64
 }
 
@@ -113,6 +117,7 @@ func NewCollector(atlasAddr, nexusAddr, forgeAddr, guardianAddr, serviceToken st
 		guardianAddr: guardianAddr,
 		serviceToken: serviceToken,
 		httpClient:   &http.Client{Timeout: 10 * time.Second},
+		heraldClient: herald.New(nexusAddr, herald.WithToken(serviceToken)),
 	}
 }
 
@@ -145,26 +150,29 @@ func (c *Collector) fetchProjects(ctx context.Context) []*Project {
 	return env.Data
 }
 
+// fetchEvents uses Herald (ADR-039).
 func (c *Collector) fetchEvents(ctx context.Context) []*NexusEvent {
-	path := fmt.Sprintf("/events?since=%d&limit=200", c.lastEventID)
-	resp, err := c.get(ctx, c.nexusAddr, path)
+	evts, err := c.heraldClient.Events().Since(ctx, c.lastEventID, 200)
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
-	var env struct {
-		OK   bool          `json:"ok"`
-		Data []*NexusEvent `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		return nil
-	}
-	for _, e := range env.Data {
+	result := make([]*NexusEvent, 0, len(evts))
+	for _, e := range evts {
 		if e.ID > c.lastEventID {
 			c.lastEventID = e.ID
 		}
+		var ts time.Time
+		ts, _ = time.Parse(time.RFC3339Nano, e.CreatedAt)
+		if ts.IsZero() {
+			ts, _ = time.Parse(time.RFC3339, e.CreatedAt)
+		}
+		result = append(result, &NexusEvent{
+			ID: e.ID, Type: e.Type, Component: e.Component,
+			Outcome: e.Outcome, ServiceID: e.ServiceID,
+			TraceID: e.TraceID, CreatedAt: ts,
+		})
 	}
-	return env.Data
+	return result
 }
 
 func (c *Collector) fetchMetrics(ctx context.Context) NexusMetrics {
@@ -212,36 +220,34 @@ func (c *Collector) fetchFindings(ctx context.Context) []*GuardianFinding {
 	return env.Data.Findings
 }
 
+// fetchServices uses Herald (ADR-039).
 func (c *Collector) fetchServices(ctx context.Context) []*Service {
-	resp, err := c.get(ctx, c.nexusAddr, "/services")
+	svcs, err := c.heraldClient.Services().List(ctx)
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
-	var env struct {
-		OK   bool       `json:"ok"`
-		Data []*Service `json:"data"`
+	result := make([]*Service, 0, len(svcs))
+	for _, s := range svcs {
+		result = append(result, &Service{
+			ID: s.ID, Name: s.Name, Project: s.Project,
+			DesiredState: s.DesiredState, ActualState: s.ActualState,
+			FailCount: s.FailCount,
+		})
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		return nil
-	}
-	return env.Data
+	return result
 }
 
+// fetchAgents uses Herald (ADR-039).
 func (c *Collector) fetchAgents(ctx context.Context) []*Agent {
-	resp, err := c.get(ctx, c.nexusAddr, "/agents")
+	agts, err := c.heraldClient.Agents().List(ctx)
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
-	var env struct {
-		OK   bool     `json:"ok"`
-		Data []*Agent `json:"data"`
+	result := make([]*Agent, 0, len(agts))
+	for _, a := range agts {
+		result = append(result, &Agent{ID: a.ID, Online: a.Online})
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		return nil
-	}
-	return env.Data
+	return result
 }
 
 func (c *Collector) get(ctx context.Context, base, path string) (*http.Response, error) {
