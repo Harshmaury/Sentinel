@@ -1,63 +1,63 @@
-# WORKFLOW-SESSION.md
-# Session: ST-tests-engine-policy
-# Date: 2026-03-20
+# WORKFLOW SESSION — FIX T2-A: Sentinel Race Condition
 
-## What changed — Sentinel test coverage (engine + actuator policy)
+**Fix ID:** UMS-SENTINEL-P1-001  (engx platform convention: SVC-LAYER-PRIORITY-SEQ)
+**Date:** 2026-03-21  
+**Status:** Ready to apply  
+**Blocks:** v2.0.0 stability gate (Tier 2 stability risk, go race detector would catch this)
 
-Zero test files existed in sentinel. Added coverage for the two most
-critical components — the insight engine rules and the actuator policy map.
+## What was wrong
 
-Both are pure functions: deterministic input → deterministic output.
-No mocks, no HTTP, no goroutines. Full suite runs in under 1ms.
+`sentinel/internal/collector/platform.go` — `Collector.lastEventID` was an
+unprotected `int64` mutated in `fetchEvents()`.
 
-## New files
+`fetchEvents()` was called from two concurrent goroutines:
+1. Polling goroutine: `analyze()` → `coll.Collect()` every 30s
+2. HTTP handler: `GET /insights/deploy-risk` → `h.coll.Collect()`
 
-- `internal/insight/engine_test.go`   — 8 rule tests + health classification + deploy risk (30 cases)
-- `internal/actuator/policy_test.go`  — policy mapping + bounded automation contract (4 tests)
+Both goroutines read and wrote `lastEventID` simultaneously with no lock.
+This is a data race: the Go race detector (`go test -race`) catches it.
+Symptom: cursor corruption, skipped events, non-deterministic insight analysis.
 
-## What is tested
+## What changed
 
-**engine_test.go:**
-- S-001: crash cascade fires only when dependents exist and crash is within 15min
-- S-002: deploy correlation fires only when deploy precedes crash in 20min window
-- S-003: dependency risk dedupes correctly across multiple dependents
-- S-004: stale project skips unverified projects and skips when no events exist
-- S-005: high denial rate maps G-001 findings correctly
-- S-006: service maintenance triggers on desired=running / actual=maintenance only
-- S-007: build failure rate maps G-003 findings correctly
-- S-008: agent disconnected skips when any agent is online
-- Health classification: info → healthy, warning → degraded, error → incident
-- Deploy risk: clean → low, warning → medium, error → high
-- Empty state produces zero insights and non-nil slice
+**File 1: `sentinel/internal/collector/platform.go`**
+- Added `mu sync.Mutex` field to `Collector` struct
+- `fetchEvents()` now locks mu to read `sinceID`, releases, makes the network call,
+  then re-locks to advance `lastEventID` only if the new max exceeds the stored value
+- Lock-free network I/O — the mutex is not held during the Herald call
 
-**policy_test.go:**
-- All 8 known rules map to correct actions
-- Unknown rules escalate conservatively (safe default)
-- Exactly 2 auto-recover rules exist (ADR-024 bounded automation contract)
-- All defined policies have non-empty Reason fields
+**File 2: `sentinel/internal/api/handler/insights.go`**
+- `DeployRisk` handler changed from `h.coll.Collect(ctx)` → `h.store.Get()`
+- The polling goroutine is now the **sole writer** to the Collector
+- HTTP handlers are **read-only consumers** of StateStore (already mutex-protected)
+- Cached state is at most 30s old — correct for deploy risk assessment
+- Removed unused `deployRiskTraceID()` helper (was only used by the old live path)
 
 ## Apply
 
-```bash
-cd ~/workspace/projects/engx/services/sentinel && \
-unzip -o /mnt/c/Users/harsh/Downloads/engx-drop/sentinel-tests-engine-policy-20260320.zip -d . && \
-go test ./internal/insight/... ./internal/actuator/...
+```powershell
+# From your drop folder
+cd ~/workspace/projects/engx/services/sentinel
+unzip -o /path/to/UMS-SENTINEL-P1-001.zip -d .
+go build ./...
 ```
 
 ## Verify
 
 ```bash
-go test ./internal/insight/... ./internal/actuator/...
-# Expected: all tests pass, no failures
+go test -race ./internal/collector/... ./internal/api/handler/...
+# Must exit 0 with no race detector output
+
+# Confirm DeployRisk endpoint still responds
+engx platform start
+curl -s http://127.0.0.1:8087/insights/deploy-risk | jq .ok
+# → true
 ```
 
-## Commit
+## What does NOT change
 
-```bash
-git add \
-  internal/insight/engine_test.go \
-  internal/actuator/policy_test.go \
-  WORKFLOW-SESSION.md && \
-git commit -m "test(sentinel): engine rules S-001–S-008 + actuator policy coverage" && \
-git push origin main
-```
+- `Collector` public interface is unchanged — `NewCollector` and `Collect` signatures identical
+- `InsightsHandler` public interface is unchanged — `NewInsightsHandler` signature identical
+- Server wiring in `api/server.go` unchanged — no changes needed there
+- `StateStore.Set/Get` unchanged
+- All other handlers (`System`, `Incidents`) already used `h.store.Get()` — correct
