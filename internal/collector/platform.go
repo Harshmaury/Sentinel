@@ -124,7 +124,7 @@ func NewCollector(atlasAddr, nexusAddr, forgeAddr, guardianAddr, serviceToken st
 		atlas:    herald.NewForService(atlasAddr, serviceToken),
 		forge:    herald.NewForService(forgeAddr, serviceToken),
 		guardian: herald.NewForService(guardianAddr, serviceToken),
-	}
+		lastEventID: loadCursor("sentinel"),}
 }
 
 // Collect fetches all upstream data and returns a PlatformState.
