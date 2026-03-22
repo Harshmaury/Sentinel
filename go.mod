@@ -7,4 +7,4 @@ require (
 	github.com/Harshmaury/Herald v0.1.5
 )
 
-require github.com/Harshmaury/Accord v0.1.2 // indirect
+require github.com/Harshmaury/Accord v0.1.6
