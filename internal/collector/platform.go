@@ -175,6 +175,7 @@ func (c *Collector) fetchEvents(ctx context.Context) []accord.EventDTO {
 		c.mu.Lock()
 		if maxID > c.lastEventID {
 			c.lastEventID = maxID
+		saveCursor("sentinel", c.lastEventID)
 		}
 		c.mu.Unlock()
 	}
