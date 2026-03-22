@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	accord "github.com/Harshmaury/Accord/api"
 	"github.com/Harshmaury/Sentinel/internal/collector"
 )
 
@@ -20,11 +21,11 @@ var engine = NewEngine()
 var now = time.Now().UTC()
 
 // crashEvent returns a SERVICE_CRASHED event for svcID at t.
-func crashEvent(svcID string, t time.Time) *collector.NexusEvent {
-	return &collector.NexusEvent{
+func crashEvent(svcID string, t time.Time) accord.EventDTO {
+	return accord.EventDTO{
 		Type:      "SERVICE_CRASHED",
 		ServiceID: svcID,
-		CreatedAt: t,
+		CreatedAt: t.Format(time.RFC3339Nano),
 	}
 }
 
@@ -67,10 +68,10 @@ func TestS001_CascadeDetection(t *testing.T) {
 			name: "crash with dependents — fires",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Events: []*collector.NexusEvent{
+				Events: []accord.EventDTO{
 					crashEvent("atlas", now.Add(-5*time.Minute)),
 				},
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "forge", DependsOn: []string{"atlas"}},
 				},
 			},
@@ -80,10 +81,10 @@ func TestS001_CascadeDetection(t *testing.T) {
 			name: "crash with no dependents — no insight",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Events: []*collector.NexusEvent{
+				Events: []accord.EventDTO{
 					crashEvent("atlas", now.Add(-5*time.Minute)),
 				},
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "forge", DependsOn: []string{}},
 				},
 			},
@@ -93,10 +94,10 @@ func TestS001_CascadeDetection(t *testing.T) {
 			name: "crash outside 15min window — no insight",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Events: []*collector.NexusEvent{
+				Events: []accord.EventDTO{
 					crashEvent("atlas", now.Add(-20*time.Minute)),
 				},
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "forge", DependsOn: []string{"atlas"}},
 				},
 			},
@@ -106,7 +107,7 @@ func TestS001_CascadeDetection(t *testing.T) {
 			name: "no events — no insight",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "forge", DependsOn: []string{"atlas"}},
 				},
 			},
@@ -116,11 +117,11 @@ func TestS001_CascadeDetection(t *testing.T) {
 			name: "two crashed services each with dependents — two insights",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Events: []*collector.NexusEvent{
+				Events: []accord.EventDTO{
 					crashEvent("atlas", now.Add(-2*time.Minute)),
 					crashEvent("nexus", now.Add(-3*time.Minute)),
 				},
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "forge", DependsOn: []string{"atlas"}},
 					{ID: "sentinel", DependsOn: []string{"nexus"}},
 				},
@@ -149,11 +150,11 @@ func TestS002_DeployCorrelation(t *testing.T) {
 			name: "deploy before crash — fires",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Events: []*collector.NexusEvent{
+				Events: []accord.EventDTO{
 					crashEvent("atlas", now.Add(-5*time.Minute)),
 				},
-				Executions: []*collector.ForgeExecution{
-					{Intent: "deploy", Target: "atlas", StartedAt: now.Add(-10*time.Minute)},
+				Executions: []accord.ForgeExecutionDTO{
+					accord.ForgeExecutionDTO{Intent: "deploy", Target: "atlas", StartedAt: now.Add(-10*time.Minute)},
 				},
 			},
 			wantCount: 1,
@@ -162,11 +163,11 @@ func TestS002_DeployCorrelation(t *testing.T) {
 			name: "deploy after crash — no correlation",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Events: []*collector.NexusEvent{
+				Events: []accord.EventDTO{
 					crashEvent("atlas", now.Add(-10*time.Minute)),
 				},
-				Executions: []*collector.ForgeExecution{
-					{Intent: "deploy", Target: "atlas", StartedAt: now.Add(-5*time.Minute)},
+				Executions: []accord.ForgeExecutionDTO{
+					accord.ForgeExecutionDTO{Intent: "deploy", Target: "atlas", StartedAt: now.Add(-5*time.Minute)},
 				},
 			},
 			wantCount: 0,
@@ -175,11 +176,11 @@ func TestS002_DeployCorrelation(t *testing.T) {
 			name: "non-deploy execution before crash — no correlation",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Events: []*collector.NexusEvent{
+				Events: []accord.EventDTO{
 					crashEvent("atlas", now.Add(-5*time.Minute)),
 				},
-				Executions: []*collector.ForgeExecution{
-					{Intent: "build", Target: "atlas", StartedAt: now.Add(-10*time.Minute)},
+				Executions: []accord.ForgeExecutionDTO{
+					accord.ForgeExecutionDTO{Intent: "build", Target: "atlas", StartedAt: now.Add(-10*time.Minute)},
 				},
 			},
 			wantCount: 0,
@@ -188,7 +189,7 @@ func TestS002_DeployCorrelation(t *testing.T) {
 			name: "crashes but no executions — no insight",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Events: []*collector.NexusEvent{
+				Events: []accord.EventDTO{
 					crashEvent("atlas", now.Add(-5*time.Minute)),
 				},
 			},
@@ -198,8 +199,8 @@ func TestS002_DeployCorrelation(t *testing.T) {
 			name: "no crashes — no insight",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Executions: []*collector.ForgeExecution{
-					{Intent: "deploy", Target: "atlas", StartedAt: now.Add(-5*time.Minute)},
+				Executions: []accord.ForgeExecutionDTO{
+					accord.ForgeExecutionDTO{Intent: "deploy", Target: "atlas", StartedAt: now.Add(-5*time.Minute)},
 				},
 			},
 			wantCount: 0,
@@ -226,7 +227,7 @@ func TestS003_DependencyRisk(t *testing.T) {
 			name: "verified project depends on unverified — fires",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "forge", Status: "verified", DependsOn: []string{"atlas"}},
 					{ID: "atlas", Status: "unverified"},
 				},
@@ -237,7 +238,7 @@ func TestS003_DependencyRisk(t *testing.T) {
 			name: "all dependencies verified — no insight",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "forge", Status: "verified", DependsOn: []string{"atlas"}},
 					{ID: "atlas", Status: "verified"},
 				},
@@ -248,7 +249,7 @@ func TestS003_DependencyRisk(t *testing.T) {
 			name: "same unverified dep referenced by two projects — one insight",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "forge", Status: "verified", DependsOn: []string{"atlas"}},
 					{ID: "sentinel", Status: "verified", DependsOn: []string{"atlas"}},
 					{ID: "atlas", Status: "unverified"},
@@ -283,11 +284,11 @@ func TestS004_StaleProject(t *testing.T) {
 			name: "verified project with no events — stale",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "navigator", Status: "verified"},
 				},
-				Events: []*collector.NexusEvent{
-					{Type: "SERVICE_STARTED", ServiceID: "nexus", CreatedAt: now.Add(-1 * time.Minute)},
+				Events: []accord.EventDTO{
+					{Type: "SERVICE_STARTED", ServiceID: "nexus", CreatedAt: now.Add(-1 * time.Minute).Format(time.RFC3339Nano)},
 				},
 			},
 			wantCount: 1,
@@ -296,11 +297,11 @@ func TestS004_StaleProject(t *testing.T) {
 			name: "verified project with matching event — not stale",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "nexus", Status: "verified"},
 				},
-				Events: []*collector.NexusEvent{
-					{Type: "SERVICE_STARTED", ServiceID: "nexus", CreatedAt: now.Add(-1 * time.Minute)},
+				Events: []accord.EventDTO{
+					{Type: "SERVICE_STARTED", ServiceID: "nexus", CreatedAt: now.Add(-1 * time.Minute).Format(time.RFC3339Nano)},
 				},
 			},
 			wantCount: 0,
@@ -309,11 +310,11 @@ func TestS004_StaleProject(t *testing.T) {
 			name: "unverified project — skipped by rule",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "unknown", Status: "unverified"},
 				},
-				Events: []*collector.NexusEvent{
-					{Type: "SERVICE_STARTED", ServiceID: "nexus", CreatedAt: now.Add(-1 * time.Minute)},
+				Events: []accord.EventDTO{
+					{Type: "SERVICE_STARTED", ServiceID: "nexus", CreatedAt: now.Add(-1 * time.Minute).Format(time.RFC3339Nano)},
 				},
 			},
 			wantCount: 0,
@@ -322,7 +323,7 @@ func TestS004_StaleProject(t *testing.T) {
 			name: "no events at all — rule skips (avoids false positives on fresh platform)",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "navigator", Status: "verified"},
 				},
 			},
@@ -350,7 +351,7 @@ func TestS005_HighDenialRate(t *testing.T) {
 			name: "G-001 finding present — fires",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Findings: []*collector.GuardianFinding{
+				Findings: []accord.GuardianFindingDTO{
 					{RuleID: "G-001", Target: "mystery", Count: 5},
 				},
 			},
@@ -360,7 +361,7 @@ func TestS005_HighDenialRate(t *testing.T) {
 			name: "two different G-001 targets — two insights",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Findings: []*collector.GuardianFinding{
+				Findings: []accord.GuardianFindingDTO{
 					{RuleID: "G-001", Target: "mystery", Count: 3},
 					{RuleID: "G-001", Target: "unknown", Count: 2},
 				},
@@ -371,7 +372,7 @@ func TestS005_HighDenialRate(t *testing.T) {
 			name: "non-G-001 finding — no insight",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Findings: []*collector.GuardianFinding{
+				Findings: []accord.GuardianFindingDTO{
 					{RuleID: "G-003", Target: "forge", Count: 5},
 				},
 			},
@@ -404,7 +405,7 @@ func TestS006_ServiceMaintenance(t *testing.T) {
 			name: "service desired=running actual=maintenance — fires",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Services: []*collector.Service{
+				Services: []accord.ServiceDTO{
 					{ID: "atlas-daemon", Name: "atlas", Project: "atlas",
 						DesiredState: "running", ActualState: "maintenance", FailCount: 3},
 				},
@@ -415,7 +416,7 @@ func TestS006_ServiceMaintenance(t *testing.T) {
 			name: "service desired=running actual=running — no insight",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Services: []*collector.Service{
+				Services: []accord.ServiceDTO{
 					{ID: "atlas-daemon", Name: "atlas", Project: "atlas",
 						DesiredState: "running", ActualState: "running"},
 				},
@@ -426,7 +427,7 @@ func TestS006_ServiceMaintenance(t *testing.T) {
 			name: "service desired=stopped actual=maintenance — no insight",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Services: []*collector.Service{
+				Services: []accord.ServiceDTO{
 					{ID: "atlas-daemon", Name: "atlas", Project: "atlas",
 						DesiredState: "stopped", ActualState: "maintenance"},
 				},
@@ -437,7 +438,7 @@ func TestS006_ServiceMaintenance(t *testing.T) {
 			name: "two services in maintenance — two insights",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Services: []*collector.Service{
+				Services: []accord.ServiceDTO{
 					{ID: "atlas-daemon", Name: "atlas", Project: "atlas",
 						DesiredState: "running", ActualState: "maintenance"},
 					{ID: "forge-daemon", Name: "forge", Project: "forge",
@@ -468,7 +469,7 @@ func TestS007_BuildFailureRate(t *testing.T) {
 			name: "G-003 finding present — fires",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Findings: []*collector.GuardianFinding{
+				Findings: []accord.GuardianFindingDTO{
 					{RuleID: "G-003", Target: "forge", Message: ">50% failure rate", Count: 8},
 				},
 			},
@@ -478,7 +479,7 @@ func TestS007_BuildFailureRate(t *testing.T) {
 			name: "G-001 finding only — no insight",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Findings: []*collector.GuardianFinding{
+				Findings: []accord.GuardianFindingDTO{
 					{RuleID: "G-001", Target: "forge", Count: 4},
 				},
 			},
@@ -511,10 +512,10 @@ func TestS008_AgentDisconnected(t *testing.T) {
 			name: "all agents offline + services desired running — fires",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Agents: []*collector.Agent{
+				Agents: []accord.AgentDTO{
 					{ID: "local", Online: false},
 				},
-				Services: []*collector.Service{
+				Services: []accord.ServiceDTO{
 					{ID: "atlas-daemon", DesiredState: "running", ActualState: "stopped"},
 				},
 			},
@@ -524,11 +525,11 @@ func TestS008_AgentDisconnected(t *testing.T) {
 			name: "one agent online — no insight",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Agents: []*collector.Agent{
+				Agents: []accord.AgentDTO{
 					{ID: "local", Online: true},
 					{ID: "remote", Online: false},
 				},
-				Services: []*collector.Service{
+				Services: []accord.ServiceDTO{
 					{ID: "atlas-daemon", DesiredState: "running"},
 				},
 			},
@@ -538,10 +539,10 @@ func TestS008_AgentDisconnected(t *testing.T) {
 			name: "all agents offline but no services desired running — no insight",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Agents: []*collector.Agent{
+				Agents: []accord.AgentDTO{
 					{ID: "local", Online: false},
 				},
-				Services: []*collector.Service{
+				Services: []accord.ServiceDTO{
 					{ID: "atlas-daemon", DesiredState: "stopped"},
 				},
 			},
@@ -551,7 +552,7 @@ func TestS008_AgentDisconnected(t *testing.T) {
 			name: "no agents registered — no insight (rule skips)",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Services: []*collector.Service{
+				Services: []accord.ServiceDTO{
 					{ID: "atlas-daemon", DesiredState: "running"},
 				},
 			},
@@ -584,11 +585,11 @@ func TestClassifyHealth(t *testing.T) {
 			name: "S-004 info only — healthy",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "navigator", Status: "verified"},
 				},
-				Events: []*collector.NexusEvent{
-					{Type: "SERVICE_STARTED", ServiceID: "nexus", CreatedAt: now.Add(-1 * time.Minute)},
+				Events: []accord.EventDTO{
+					{Type: "SERVICE_STARTED", ServiceID: "nexus", CreatedAt: now.Add(-1 * time.Minute).Format(time.RFC3339Nano)},
 				},
 			},
 			wantHealth: HealthHealthy,
@@ -597,7 +598,7 @@ func TestClassifyHealth(t *testing.T) {
 			name: "S-006 warning — degraded",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Services: []*collector.Service{
+				Services: []accord.ServiceDTO{
 					{ID: "atlas-daemon", Name: "atlas", Project: "atlas",
 						DesiredState: "running", ActualState: "maintenance"},
 				},
@@ -608,10 +609,10 @@ func TestClassifyHealth(t *testing.T) {
 			name: "S-001 error — incident",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Events: []*collector.NexusEvent{
+				Events: []accord.EventDTO{
 					crashEvent("atlas", now.Add(-2*time.Minute)),
 				},
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "forge", DependsOn: []string{"atlas"}},
 				},
 			},
@@ -646,7 +647,7 @@ func TestDeployRisk(t *testing.T) {
 			name: "unverified dependency — medium risk",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "forge", Status: "verified", DependsOn: []string{"atlas"}},
 					{ID: "atlas", Status: "unverified"},
 				},
@@ -657,10 +658,10 @@ func TestDeployRisk(t *testing.T) {
 			name: "active crash cascade — high risk",
 			state: &collector.PlatformState{
 				CollectedAt: now,
-				Events: []*collector.NexusEvent{
+				Events: []accord.EventDTO{
 					crashEvent("atlas", now.Add(-2*time.Minute)),
 				},
-				Projects: []*collector.Project{
+				Projects: []accord.AtlasProjectDTO{
 					{ID: "forge", DependsOn: []string{"atlas"}},
 				},
 			},

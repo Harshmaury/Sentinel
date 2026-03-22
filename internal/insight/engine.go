@@ -77,13 +77,25 @@ func (e *Engine) DeployRisk(state *collector.PlatformState) *DeployRisk {
 
 // ── RULE IMPLEMENTATIONS ──────────────────────────────────────────────────────
 
+
+// parseEventTime parses an RFC3339/RFC3339Nano event timestamp string.
+// EventDTO.CreatedAt is a string — this helper converts it for time comparisons.
+func parseEventTime(s string) time.Time {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
 // S-001: detect crash events and identify dependents at risk.
 func (e *Engine) ruleCascadeDetection(state *collector.PlatformState) []*Insight {
 	cutoff := time.Now().UTC().Add(-15 * time.Minute)
 	crashed := map[string]bool{}
 
 	for _, ev := range state.Events {
-		if ev.Type == canonevents.EventServiceCrashed && ev.CreatedAt.After(cutoff) {
+		if ev.Type == canonevents.EventServiceCrashed && parseEventTime(ev.CreatedAt).After(cutoff) {
 			crashed[ev.ServiceID] = true
 		}
 	}
@@ -127,10 +139,10 @@ func (e *Engine) ruleDeployCorrelation(state *collector.PlatformState) []*Insigh
 	var firstCrash time.Time
 	crashCount := 0
 	for _, ev := range state.Events {
-		if ev.Type == canonevents.EventServiceCrashed && ev.CreatedAt.After(cutoff) {
+		if ev.Type == canonevents.EventServiceCrashed && parseEventTime(ev.CreatedAt).After(cutoff) {
 			crashCount++
-			if firstCrash.IsZero() || ev.CreatedAt.Before(firstCrash) {
-				firstCrash = ev.CreatedAt
+			if firstCrash.IsZero() || parseEventTime(ev.CreatedAt).Before(firstCrash) {
+				firstCrash = parseEventTime(ev.CreatedAt)
 			}
 		}
 	}

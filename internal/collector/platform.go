@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	accord "github.com/Harshmaury/Accord/api"
 	herald "github.com/Harshmaury/Herald/client"
 )
 
@@ -89,14 +90,15 @@ type GuardianFinding struct {
 }
 
 // PlatformState is the assembled snapshot of all upstream data.
+// ADR-039/F-3: now uses Accord DTOs directly — no local shadow types.
 type PlatformState struct {
-	Projects    []*Project
-	Events      []*NexusEvent
-	Metrics     NexusMetrics
-	Executions  []*ForgeExecution
-	Findings    []*GuardianFinding
-	Services    []*Service
-	Agents      []*Agent
+	Projects    []accord.AtlasProjectDTO
+	Events      []accord.EventDTO
+	Metrics     accord.NexusMetricsDTO
+	Executions  []accord.ForgeExecutionDTO
+	Findings    []accord.GuardianFindingDTO
+	Services    []accord.ServiceDTO
+	Agents      []accord.AgentDTO
 	CollectedAt time.Time
 }
 
@@ -140,35 +142,17 @@ func (c *Collector) Collect(ctx context.Context) *PlatformState {
 }
 
 // fetchProjects uses Herald Atlas client.
-func (c *Collector) fetchProjects(ctx context.Context) []*Project {
+func (c *Collector) fetchProjects(ctx context.Context) []accord.AtlasProjectDTO {
 	projs, err := c.atlas.Atlas().Projects(ctx)
 	if err != nil {
 		return nil
 	}
-	out := make([]*Project, 0, len(projs))
-	for _, p := range projs {
-		caps := p.Capabilities
-		if caps == nil {
-			caps = []string{}
-		}
-		deps := p.DependsOn
-		if deps == nil {
-			deps = []string{}
-		}
-		out = append(out, &Project{
-			ID:           p.ID,
-			Status:       p.Status,
-			Language:     p.Language,
-			Capabilities: caps,
-			DependsOn:    deps,
-		})
-	}
-	return out
+	return projs
 }
 
 // fetchEvents uses Herald Nexus events client.
 // mu serialises access to lastEventID — safe for concurrent callers.
-func (c *Collector) fetchEvents(ctx context.Context) []*NexusEvent {
+func (c *Collector) fetchEvents(ctx context.Context) []accord.EventDTO {
 	c.mu.Lock()
 	sinceID := c.lastEventID
 	c.mu.Unlock()
@@ -179,21 +163,12 @@ func (c *Collector) fetchEvents(ctx context.Context) []*NexusEvent {
 	}
 
 	var maxID int64
-	result := make([]*NexusEvent, 0, len(evts))
+	result := make([]accord.EventDTO, 0, len(evts))
 	for _, e := range evts {
 		if e.ID > maxID {
 			maxID = e.ID
 		}
-		var ts time.Time
-		ts, _ = time.Parse(time.RFC3339Nano, e.CreatedAt)
-		if ts.IsZero() {
-			ts, _ = time.Parse(time.RFC3339, e.CreatedAt)
-		}
-		result = append(result, &NexusEvent{
-			ID: e.ID, Type: e.Type, Component: e.Component,
-			Outcome: e.Outcome, ServiceID: e.ServiceID,
-			TraceID: e.TraceID, CreatedAt: ts,
-		})
+		result = append(result, e)
 	}
 
 	if maxID > sinceID {
@@ -207,84 +182,46 @@ func (c *Collector) fetchEvents(ctx context.Context) []*NexusEvent {
 }
 
 // fetchMetrics uses Herald NexusMetrics client.
-func (c *Collector) fetchMetrics(ctx context.Context) NexusMetrics {
+func (c *Collector) fetchMetrics(ctx context.Context) accord.NexusMetricsDTO {
 	m, err := c.nexus.NexusMetrics().Get(ctx)
 	if err != nil {
-		return NexusMetrics{}
+		return accord.NexusMetricsDTO{}
 	}
-	return NexusMetrics{
-		ServicesCrashedTotal: m.ServicesCrashedTotal,
-		ServicesRunning:      m.ServicesRunning,
-		UptimeSeconds:        m.UptimeSeconds,
-	}
+	return *m
 }
 
 // fetchHistory uses Herald Forge client.
-func (c *Collector) fetchHistory(ctx context.Context) []*ForgeExecution {
+func (c *Collector) fetchHistory(ctx context.Context) []accord.ForgeExecutionDTO {
 	records, err := c.forge.Forge().History(ctx, 200)
 	if err != nil {
 		return nil
 	}
-	out := make([]*ForgeExecution, 0, len(records))
-	for _, r := range records {
-		out = append(out, &ForgeExecution{
-			Intent:     r.Intent,
-			Target:     r.Target,
-			Status:     r.Status,
-			DurationMS: r.DurationMS,
-			TraceID:    r.TraceID,
-			StartedAt:  r.StartedAt,
-		})
-	}
-	return out
+	return records
 }
 
 // fetchFindings uses Herald Guardian client.
-func (c *Collector) fetchFindings(ctx context.Context) []*GuardianFinding {
+func (c *Collector) fetchFindings(ctx context.Context) []accord.GuardianFindingDTO {
 	report, err := c.guardian.Guardian().Findings(ctx)
 	if err != nil {
 		return nil
 	}
-	out := make([]*GuardianFinding, 0, len(report.Findings))
-	for _, f := range report.Findings {
-		out = append(out, &GuardianFinding{
-			RuleID:   f.RuleID,
-			Severity: f.Severity,
-			Target:   f.Target,
-			Message:  f.Message,
-			Count:    f.Count,
-			LastSeen: f.LastSeen,
-		})
-	}
-	return out
+	return report.Findings
 }
 
 // fetchServices uses Herald Nexus services client.
-func (c *Collector) fetchServices(ctx context.Context) []*Service {
+func (c *Collector) fetchServices(ctx context.Context) []accord.ServiceDTO {
 	svcs, err := c.nexus.Services().List(ctx)
 	if err != nil {
 		return nil
 	}
-	out := make([]*Service, 0, len(svcs))
-	for _, s := range svcs {
-		out = append(out, &Service{
-			ID: s.ID, Name: s.Name, Project: s.Project,
-			DesiredState: s.DesiredState, ActualState: s.ActualState,
-			FailCount: s.FailCount,
-		})
-	}
-	return out
+	return svcs
 }
 
 // fetchAgents uses Herald Nexus agents client.
-func (c *Collector) fetchAgents(ctx context.Context) []*Agent {
+func (c *Collector) fetchAgents(ctx context.Context) []accord.AgentDTO {
 	agts, err := c.nexus.Agents().List(ctx)
 	if err != nil {
 		return nil
 	}
-	out := make([]*Agent, 0, len(agts))
-	for _, a := range agts {
-		out = append(out, &Agent{ID: a.ID, Online: a.Online})
-	}
-	return out
+	return agts
 }
