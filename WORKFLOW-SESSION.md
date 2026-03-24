@@ -1,30 +1,5 @@
-# WORKFLOW SESSION — ENGX-SENTINEL-P1-001
+## 2026-03-25 | GV-doc-restructure | sentinel
 
-**Date:** 2026-03-21
-**Repo:** Sentinel
-**Requires:** ENGX-HERALD-P1-001 applied and pushed first
-
-## What changed
-
-ADR-039: all raw HTTP collector calls replaced with Herald typed clients.
-Raw httpClient fields removed. Anonymous struct decodes eliminated.
-Schema drift on upstream API changes now caught at compile time.
-
-## Apply
-
-```bash
-cd ~/workspace/projects/engx/services/sentinel
-unzip -o /mnt/c/Users/harsh/Downloads/engx-drop/ENGX-SENTINEL-P1-001.zip -d .
-go build ./...
-git add internal/collector/
-git commit -m "feat(sentinel): ADR-039 — Herald migration for all collectors"
-git push origin main
-```
-
-## Verify
-
-```bash
-go build ./...
-go test ./...
-engx doctor
-```
+Task:    SERVICE-CONTRACT.md rebuilt -- 4C model (Code/Contract/Control/Context)
+Docs:    SERVICE-CONTRACT.md
+ZIPs:    sentinel-doc-restructure-20260325-1153.zip
